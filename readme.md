@@ -1,14 +1,22 @@
-编译在当前目录下执行：
-g++ -I./ *.cpp -o ./sim.out -std=c++11
+# RISCV-64I-Simulator
 
-运行方法：
+Compile:
+
+```bash
+g++ -I./ *.cpp -o ./sim.out -std=c++11
+```
+
+Run:
+```bash
 ./sim.out [riscv-elffile] [-m] [-v] [-s] [-b strategy]
- 
+```
+
 riscv-elffile为待执⾏的riscv ELF⽂件。-m为运⾏结束时打出所有内存空间到memory.txt。-v为
 verbose，会详细输出模拟器流⽔线每⼀阶段步骤。-s为单步调试。-b添加分⽀预测策略，模拟器⽀持
 AT(Always Taken), NT(Not Taken), BTFNT(Backward Taken, Forward Not Taken)。
 
-举例：
+Example:
+```bash
 $ ./sim.out test-sample/qs.riscv -s -b BTFNT
 WB: Bubble
 MEM: Bubble
@@ -70,4 +78,4 @@ T4: 0 (0)
 T5: 0 (0)
 T6: 0 (0)
 
-
+```
