@@ -1,4 +1,5 @@
 #include "Simulation.h"
+#include "cache.h"
 #include "elfio/elfio.hpp"
 using namespace std;
 
@@ -6,6 +7,10 @@ extern void loader(ELFIO::elfio &reader, Memory &memory);
 extern void printElfInfo(ELFIO::elfio &reader);
 
 Memory memory;
+Cache l1;
+Cache l2;
+Cache llc;
+
 int branch_strat = AT;
 
 //输出名字
@@ -83,13 +88,17 @@ ELFIO::elfio reader;
 
 //性能计数相关模块
 int inst_cnt = 0;
-int cycle_cnt = 0;
+int pipeline_cycle_cnt = 0;
+int cache_cycle_cnt = 0;
 int correct_predict = 0;
 int mispredict = 0;
 
 int cnt_j = 0;
 int control_cnt = 0;
 int loaduse_cnt = 0;
+
+int cache_cnt = 0;
+int cachehit_cnt = 0;
 
 int main(int argc, char **argv)
 {
@@ -135,8 +144,67 @@ int main(int argc, char **argv)
   if (!reader.load(file))
   {
     printf("Can't find or process ELF file %s\n", file);
-    return 2;
+    return 0;
   }
+  //初始化存储参数
+
+  l1.SetLower(&l2);
+  l2.SetLower(&llc);
+  llc.SetLower(&memory);
+
+  StorageStats s;
+  memset(&s, 0, sizeof(s));
+  memory.SetStats(s);
+  l1.SetStats(s);
+  l2.SetStats(s);
+  llc.SetStats(s);
+
+  StorageLatency ml;
+  ml.bus_latency = 0;
+  ml.hit_latency = 100;
+  memory.SetLatency(ml);
+
+  StorageLatency l1l;
+  l1l.bus_latency = 0;
+  l1l.hit_latency = 1;
+  l1.SetLatency(l1l);
+
+  StorageLatency l2l;
+  l2l.bus_latency = 0;
+  l2l.hit_latency = 8;
+  l2.SetLatency(l2l);
+
+  StorageLatency llcl;
+  llcl.bus_latency = 0;
+  llcl.hit_latency = 20;
+  llc.SetLatency(llcl);
+
+  CacheConfig config1;
+  config1.size = 32 * 1024;
+  config1.associativity = 8;
+  config1.block_size = 64;
+  config1.set_num = 32 * 1024 / (64 * 8);
+  config1.write_through = 0;
+  config1.write_allocate = 1; //?unknown
+  l1.SetConfig(config1);
+
+  CacheConfig config2;
+  config2.size = 256 * 1024;
+  config2.associativity = 8;
+  config2.block_size = 64;
+  config2.set_num = 256 * 1024 / (64 * 8);
+  config2.write_through = 0;
+  config2.write_allocate = 1; //?unknown
+  l2.SetConfig(config2);
+
+  CacheConfig config3;
+  config3.size = 8 * 1024 * 1024;
+  config3.associativity = 8;
+  config3.block_size = 64;
+  config3.set_num = 8 * 1024 * 1024 / (64 * 8);
+  config3.write_through = 0;
+  config3.write_allocate = 1; //?unknown
+  llc.SetConfig(config3);
 
   //初始化内存
   loader(reader, memory);
@@ -171,7 +239,7 @@ void SIM::simulate()
   // 指令循环
   while (true)
   {
-    cycle_cnt++;
+    pipeline_cycle_cnt++;
     WB();
     MEM();
     EX();
@@ -191,7 +259,7 @@ void SIM::simulate()
       control_cnt++;
     }
     int32_t ins = Ereg.cur.inst;
-    
+
     if ((ins == BEQ || ins == BNE || ins == BLT || ins == BGE || ins == BLTU || ins == BGEU) && e_Bwrong)
     {
       Freg.stall = true; //下一周期M转发，会被成功预测，也可以是bubble
@@ -283,7 +351,14 @@ void SIM::IF()
     printf("IF: jalr_pc: %x\n", jalr_pc);
     printf("IF: M_Bwrong: %d\n", Mreg.cur.M_Bwrong);
   }
-  uint32_t inst = memory.load(pc, 4);
+  // uint32_t inst = memory.load(pc, 4);
+  // cache_cycle_cnt+=100;
+  int cache_hit = 0, cache_time = 0;
+  uint32_t inst;
+  l1.HandleRequest(pc, 4, 1, (char *)&inst, cache_hit, cache_time);
+  cachehit_cnt += cache_hit;
+  cache_cnt++;
+  cache_cycle_cnt += cache_time;
 
   if (verbose)
   {
@@ -1161,8 +1236,17 @@ void SIM::MEM()
   bool mem_signed = Mreg.cur.mem_signed;
   uint32_t memLen = Mreg.cur.memLen;
 
+  int cache_hit = 0, cache_time = 0;
+
   if (mem_write)
-    memory.store(valE, valB, memLen);
+  {
+    //memory.store(valE, valB, memLen);
+    //cache_cycle_cnt+=100;
+    l1.HandleRequest(valE, memLen, 0, (char *)(&valB), cache_hit, cache_time);
+    cache_cycle_cnt += cache_time;
+    cachehit_cnt += cache_hit;
+    cache_cnt++;
+  }
 
   if (mem_read) //只有这一种情况修改valM，且不会再使用valE
   {
@@ -1171,10 +1255,58 @@ void SIM::MEM()
       printf("MEM: invalid read at %x\n", valE);
       exit(-1);
     }
-    if (mem_signed)
-      valM = (int64_t)memory.load(valE, memLen);
-    else
-      valM = (uint64_t)memory.load(valE, memLen);
+    // if (mem_signed)
+    //   valM = (int64_t)memory.load(valE, memLen);
+    // else
+    //   valM = (uint64_t)memory.load(valE, memLen);
+    // cache_cycle_cnt+=100;
+
+    char tmp[16]; //switch中不可声明，统一char
+    l1.HandleRequest(valE, memLen, 1, tmp, cache_hit, cache_time);
+    cache_cycle_cnt += cache_time;
+    cachehit_cnt += cache_hit;
+    cache_cnt++;
+    //小端法使得可以直接扩展读取
+
+    for (int i = memLen; i < 16; i++)
+    {
+      tmp[i] = 0;
+    }
+    switch (memLen)
+    {
+    case 8:
+    {
+      if (mem_signed)
+        valM = (int64_t) * ((uint64_t *)tmp);
+      else
+        valM = (uint64_t) * ((uint64_t *)tmp);
+      break;
+    }
+    case 4:
+    {
+      if (mem_signed)
+        valM = (int64_t) * ((uint32_t *)tmp);
+      else
+        valM = (uint64_t) * ((uint32_t *)tmp);
+      break;
+    }
+    case 2:
+    {
+      if (mem_signed)
+        valM = (int64_t) * ((uint16_t *)tmp);
+      else
+        valM = (uint64_t) * ((uint16_t *)tmp);
+      break;
+    }
+    case 1:
+    {
+      if (mem_signed)
+        valM = (int64_t) * ((uint8_t *)tmp);
+      else
+        valM = (uint64_t) * ((uint8_t *)tmp);
+      break;
+    }
+    }
   }
 
   if (verbose)
@@ -1216,16 +1348,26 @@ void SIM::syscall(int64_t valA, int64_t valB)
 {
   int64_t syscallnum = valB; //a7
   int64_t arg1 = valA;       //a0
+  int cache_hit = 0, cache_time = 0;
   char c;
   switch (syscallnum)
   {
-  case 0:                       //char* str
-    c = memory.load_byte(arg1); //是int，只能按字节
+  case 0: //char* str
+    //c = memory.load_byte(arg1);
+    l1.HandleRequest(arg1, 1, 1, &c, cache_hit, cache_time);
+    cachehit_cnt += cache_hit;
+    cache_cnt++;
+    cache_cycle_cnt += cache_time;
     while (c != '\0')
     {
       printf("%c", c);
       arg1++;
-      c = memory.load_byte(arg1);
+      //c = memory.load_byte(arg1);
+      int cache_hit = 0, cache_time = 0;
+      l1.HandleRequest(arg1, 1, 1, &c, cache_hit, cache_time);
+      cachehit_cnt += cache_hit;
+      cache_cnt++;
+      cache_cycle_cnt += cache_time;
     }
     break;
   case 1: //char
@@ -1236,16 +1378,37 @@ void SIM::syscall(int64_t valA, int64_t valB)
     break;
   case 93:
   {
-    printf("Exit normally\n");
-    printf("Cycles: %d\n", cycle_cnt);
+    int total_cycle_cnt = cache_cycle_cnt + pipeline_cycle_cnt;
+    printf("Exit normally\n\n");
+    printf("Total Cycles: %d\n", total_cycle_cnt);
+    printf("Pipeline Cycles: %d\n", pipeline_cycle_cnt);
     printf("Instructions: %d\n", inst_cnt);
-    printf("CPI: %f\n", (double)cycle_cnt / inst_cnt);
+    printf("CPI with cache: %f\n", (double)total_cycle_cnt / inst_cnt);
+    printf("CPI w/o cache: %f\n", (double)(pipeline_cycle_cnt + 100 * cache_cnt) / inst_cnt);
+    printf("Pipeline CPI: %f\n\n", (double)pipeline_cycle_cnt / inst_cnt);
+
     printf("Load-use hazards: %d\n", loaduse_cnt);
     printf("Jumps: %d\n", cnt_j);
     printf("Mispredicts: %d\n", mispredict);
     printf("Control hazards (JXX + BXX): %d\n", control_cnt);
-    printf("%s prediction accuracy: %lf \n",
+    printf("%s prediction accuracy: %lf \n\n",
            strat_name[branch_strat], (double)correct_predict / (correct_predict + mispredict)); //注意不加double按整数舍入
+
+    printf("L1 Cache accesses: %d\n", cache_cnt);
+    printf("L1 Cache miss: %d\n", cache_cnt - cachehit_cnt);
+    printf("L1 Miss rate: %f\n", (double)(cache_cnt - cachehit_cnt) / cache_cnt);
+
+    StorageStats l2s;
+    l2.GetStats(l2s);
+    printf("L2 Cache accesses: %d\n", l2s.access_counter);
+    printf("L2 Cache miss: %d\n", l2s.miss_num);
+    printf("L2 Miss rate: %f\n", (double)l2s.miss_num / l2s.access_counter);
+
+    StorageStats l3s;
+    llc.GetStats(l3s);
+    printf("L3 Cache accesses: %d\n", l3s.access_counter);
+    printf("L3 Cache miss: %d\n", l3s.miss_num);
+    printf("L3 Miss rate: %f\n", (double)l3s.miss_num / l3s.access_counter);
 
     if (dumpMem)
       memory.dump_memory();

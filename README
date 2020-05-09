@@ -1,0 +1,8 @@
+compile:
+g++ -I./ *.cpp -o ./sim.out -std=c++11
+
+run:
+./sim.out [name of elffile (required)]
+
+example:
+./sim.out test-sample/ack.riscv

@@ -6,6 +6,8 @@
 #include <cmath>
 // #include <sys/io.h>
 #include <ctime>
+#include <stdint.h>
+#include "storage.h"
 #include "elfio/elfio.hpp"
 using namespace std;
 
@@ -128,12 +130,32 @@ using namespace std;
 #define PTE(addr) ((addr >> 12) & 0x3FF)
 #define OFF(addr) (addr & 0xFFF)
 
-class Memory
+class Memory : public Storage
 {
 public:
   uint8_t **memory[1024] = {0};
   Memory() {}
   ~Memory() {}
+  // Main access process
+  void HandleRequest(uint32_t addr, int bytes, int read,
+                     char *content, int &hit, int &time)
+  {
+
+    hit = 1;
+    time = latency_.hit_latency + latency_.bus_latency;
+    stats_.access_time += time;
+    if (read == 1)
+    {
+      for (int i = 0; i < bytes; i++)
+        content[i] = char(load_byte(addr + i));
+    }
+    else
+    {
+      for (int i = 0; i < bytes; i++)
+        store_byte(addr + i, uint8_t(content[i]));
+    }
+  }
+
   void store_byte(uint32_t addr, uint8_t val)
   {
     uint32_t i = PDE(addr);
@@ -219,6 +241,7 @@ public:
       return true;
     return false;
   }
+  DISALLOW_COPY_AND_ASSIGN(Memory);
 };
 class PIPE_REG
 {
